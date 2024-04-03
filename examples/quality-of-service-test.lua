@@ -11,7 +11,8 @@ local log		= require "log"
 
 local PKT_SIZE	= 124 -- without CRC
 -- check out l3-load-latency.lua if you want to get this via ARP
-local ETH_DST	= "10:11:12:13:14:15" -- src mac is taken from the NIC
+local ETH_SRC	= "12:13:14:15:16:17"
+local ETH_DST	= "10:11:12:13:14:15"
 local IP_SRC	= "192.168.0.1"
 local NUM_FLOWS	= 256 -- src ip will be IP_SRC + random(0, NUM_FLOWS - 1)
 local IP_DST	= "10.0.0.1"
@@ -143,7 +144,16 @@ end
 function timerSlave(txQueue, rxQueue, bgPort, port, ratio)
 	local txDev = txQueue.dev
 	local rxDev = rxQueue.dev
-	local timestamper = ts:newUdpTimestamper(txQueue, rxQueue)
+	local timestamper = ts:newUdpTimestamper(txQueue, rxQueue, memory.createMemPool(function(buf)
+		buf:getUdpPtpPacket():fill{
+			pktLength = PKT_SIZE, -- this sets all length headers fields in all used protocols
+			ethSrc = ETH_SRC, -- get the src mac from the device
+			ethDst = ETH_DST,
+			-- ipSrc will be set later as it varies
+			ip4Dst = IP_DST,
+			udpSrc = PORT_SRC,
+		}
+	end))
 	local histBg, histFg = hist(), hist()
 	-- wait one second, otherwise we might start timestamping before the load is applied
 	mg.sleepMillis(1000)
@@ -152,16 +162,8 @@ function timerSlave(txQueue, rxQueue, bgPort, port, ratio)
 	while mg.running() do
 		local port = math.random() <= ratio and port or bgPort
 		local lat = timestamper:measureLatency(PKT_SIZE, function(buf)
-			local pkt = buf:getUdpPacket()
-			pkt:fill{
-				pktLength = PKT_SIZE, -- this sets all length headers fields in all used protocols
-				ethSrc = txQueue, -- get the src mac from the device
-				ethDst = ETH_DST,
-				-- ipSrc will be set later as it varies
-				ip4Dst = IP_DST,
-				udpSrc = PORT_SRC,
-				udpDst = port,
-			}
+			local pkt = buf:getUdpPtpPacket()
+			pkt.udp:setSrcPort(port)
 			pkt.ip4.src:set(baseIP + math.random(NUM_FLOWS) - 1)
 		end)
 		if lat then
