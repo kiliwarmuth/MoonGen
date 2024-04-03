@@ -31,6 +31,7 @@ function configure(parser)
 	parser:option("-r --rate", "Transmit rate in Mbit/s."):default(10000):convert(tonumber)
 	parser:option("-f --flows", "Number of flows (randomized source IP)."):default(4):convert(tonumber)
 	parser:option("-s --size", "Packet size."):default(60):convert(tonumber)
+	parser:option("-o --output_file", "Filename of the latency histogram."):default("histogram.csv")
 end
 
 function master(args)
@@ -40,22 +41,27 @@ function master(args)
 	-- max 1kpps timestamping traffic timestamping
 	-- rate will be somewhat off for high-latency links at low rates
 	if args.rate > 0 then
-		txDev:getTxQueue(0):setRate(args.rate - (args.size + 4) * 8 / 1000)
+		txDev:getTxQueue(0):setRate(args.rate - (args.size + 4) * 8 / 1000, args.size)
 	end
-	mg.startTask("loadSlave", txDev:getTxQueue(0), rxDev, args.size, args.flows)
-	mg.startTask("timerSlave", txDev:getTxQueue(1), rxDev:getRxQueue(1), args.size, args.flows)
-	arp.startArpTask{
-		-- run ARP on both ports
-		{ rxQueue = rxDev:getRxQueue(2), txQueue = rxDev:getTxQueue(2), ips = RX_IP },
+	mg.startTask("timerSlave", txDev:getTxQueue(1), rxDev:getRxQueue(1), args.size, args.flows, args.output_file)
+	mg.sleepMillis(300)
+
+	-- run ARP on both ports
+	arpInterfaces = {{ rxQueue = rxDev:getRxQueue(2), txQueue = rxDev:getTxQueue(2), ips = RX_IP, mac = "12:13:14:15:16:17" }}
+	if rxDev ~= txDev then
 		-- we need an IP address to do ARP requests on this interface
-		{ rxQueue = txDev:getRxQueue(2), txQueue = txDev:getTxQueue(2), ips = ARP_IP }
-	}
+		table.insert(arpInterfaces, { rxQueue = txDev:getRxQueue(2), txQueue = txDev:getTxQueue(2), ips = ARP_IP, mac = "14:15:16:17:18:19" })
+	end
+	arp.startArpTask(arpInterfaces)
+
+	mg.sleepMillis(300)
+	mg.startTask("loadSlave", txDev:getTxQueue(0), rxDev, args.size, args.flows)
 	mg.waitForTasks()
 end
 
 local function fillUdpPacket(buf, len)
 	buf:getUdpPacket():fill{
-		ethSrc = queue,
+		ethSrc = nil, -- default ethernet source
 		ethDst = DST_MAC,
 		ip4Src = SRC_IP,
 		ip4Dst = DST_IP,
@@ -104,7 +110,7 @@ function loadSlave(queue, rxDev, size, flows)
 	rxCtr:finalize()
 end
 
-function timerSlave(txQueue, rxQueue, size, flows)
+function timerSlave(txQueue, rxQueue, size, flows, histfile)
 	doArp()
 	if size < 84 then
 		log:warn("Packet size %d is smaller than minimum timestamp size 84. Timestamped packets will be larger than load packets.", size)
@@ -129,6 +135,6 @@ function timerSlave(txQueue, rxQueue, size, flows)
 	-- print the latency stats after all the other stuff
 	mg.sleepMillis(300)
 	hist:print()
-	hist:save("histogram.csv")
+	hist:save(histfile)
 end
 
